@@ -54,13 +54,22 @@ PG_MODULE_MAGIC;
 						   ); \
 			} while (0)
 
+#define do_assert_value(condition, message, value)          \
+			do { \
+				if (!(condition)) \
+					ereport(ERROR, \
+							(errcode(ERRCODE_RAISE_EXCEPTION), \
+							 errmsg(message, (value))          \
+							) \
+						   ); \
+			} while (0)
+
 /*
- * text_catenate
- *	Guts of textcat(), broken out so it can be used by other functions
+ * Catenate t1 and t2 of text*.
  *
  * Arguments can be in short-header form, but not compressed or out-of-line
  */
-static text* text_catenate(text *t1, text *t2)
+static text* text_catenate_internal(text *t1, text *t2)
 {
 	text	   *result;
 	int			len1,
@@ -95,7 +104,7 @@ static text* text_catenate(text *t1, text *t2)
 
 static bool table_exists_internal(text* full_table_name)
 {
-    List*           names;
+    List           *names;
     Oid             relid;
 
     names = textToQualifiedNameList(full_table_name);
@@ -148,8 +157,8 @@ static char* btrim_internal(char* string, int* string_len)
  */
 Datum to_char(PG_FUNCTION_ARGS)
 {
-    bool    input;
-    char*   result;
+    bool        input;
+    char       *result;
     
     if (PG_ARGISNULL(0))
         PG_RETURN_NULL();
@@ -180,49 +189,47 @@ Datum regclass_to_text(PG_FUNCTION_ARGS)
     HeapTuple   classtup;
  
     if (classid == InvalidOid)
-        {
-            result = pstrdup("-");
-            PG_RETURN_CSTRING(result);
-        }
+    {
+        result = pstrdup("-");
+        PG_RETURN_CSTRING(result);
+    }
  
     classtup = SearchSysCache1(RELOID, ObjectIdGetDatum(classid));
  
     if (HeapTupleIsValid(classtup))
-        {
-            Form_pg_class classform = (Form_pg_class) GETSTRUCT(classtup);
-            char       *classname = NameStr(classform->relname);
+    {
+        Form_pg_class classform = (Form_pg_class) GETSTRUCT(classtup);
+        char       *classname = NameStr(classform->relname);
  
-            /*
-             * In bootstrap mode, skip the fancy namespace stuff and just return
-             * the class name.  (This path is only needed for debugging output
-             * anyway.)
-             */
-            if (IsBootstrapProcessingMode())
-                result = pstrdup(classname);
+        /*
+         * In bootstrap mode, skip the fancy namespace stuff and just return
+         * the class name.  (This path is only needed for debugging output
+         * anyway.)
+         */
+        if (IsBootstrapProcessingMode())
+            result = pstrdup(classname);
+        else
+        {
+            char       *nspname;
+            
+            /* Would this class be found by regclassin? If not, qualify it. */
+            if (RelationIsVisible(classid))
+                nspname = NULL;
             else
-                {
-                    char       *nspname;
- 
-                    /*
-                     * Would this class be found by regclassin? If not, qualify it.
-                     */
-                    if (RelationIsVisible(classid))
-                        nspname = NULL;
-                    else
-                        nspname = get_namespace_name(classform->relnamespace);
- 
-                    result = quote_qualified_identifier(nspname, classname);
-                }
- 
-            ReleaseSysCache(classtup);
+                nspname = get_namespace_name(classform->relnamespace);
+            
+            result = quote_qualified_identifier(nspname, classname);
         }
+        
+        ReleaseSysCache(classtup);
+    }
     else
-        {
-            /* If OID doesn't match any pg_class entry, return it numerically */
-            result = (char *) palloc(NAMEDATALEN);
-            snprintf(result, NAMEDATALEN, "%u", classid);
-        }
- 
+    {
+        /* If OID doesn't match any pg_class entry, return it numerically */
+        result = (char *) palloc(NAMEDATALEN);
+        snprintf(result, NAMEDATALEN, "%u", classid);
+    }
+    
     PG_RETURN_TEXT_P(cstring_to_text(result));
 }
 PG_FUNCTION_INFO_V1(regclass_to_text);
@@ -236,19 +243,15 @@ PG_FUNCTION_INFO_V1(regclass_to_text);
  */
 void assert(PG_FUNCTION_ARGS)
 {
-    bool    condition;
-    //  char*   reason ;
-    text*   reason;
+    bool        condition;
+    text       *reason;
 
     condition = PG_GETARG_BOOL(0);
-    //    reason = text_to_cstring(PG_GETARG_TEXT_PP(1));
     reason = PG_GETARG_TEXT_PP(1);
     
-    if (!(condition)) {
-        ereport(ERROR,
-                (errcode(ERRCODE_RAISE_EXCEPTION),
-                 errmsg(text_to_cstring(reason))));
-    }
+    do_assert(condition,
+              text_to_cstring(reason));
+              
 }
 PG_FUNCTION_INFO_V1(assert);
 
@@ -261,7 +264,7 @@ PG_FUNCTION_INFO_V1(assert);
  */
 Datum table_exists(PG_FUNCTION_ARGS)
 {
-    text*           input;
+    text           *input;
 
     if (PG_ARGISNULL(0))
         PG_RETURN_BOOL(false);
@@ -282,8 +285,14 @@ PG_FUNCTION_INFO_V1(table_exists);
  */
 Datum column_exists(PG_FUNCTION_ARGS)
 {
-    text*    full_table_name;
-    text*    column_name;
+    text              *full_table_name;
+    text              *column_name;
+    List              *names;
+    Oid                relid;
+    Relation           rel;
+    TupleDesc          td;
+    int                i;
+    bool               existence = false;
 
     if (PG_ARGISNULL(0))
         PG_RETURN_BOOL(false);
@@ -292,11 +301,31 @@ Datum column_exists(PG_FUNCTION_ARGS)
 
     full_table_name = PG_GETARG_TEXT_PP(0);
     column_name = PG_GETARG_TEXT_PP(1);
+    
+    names = textToQualifiedNameList(full_table_name);
+    relid = RangeVarGetRelid(makeRangeVarFromNameList(names), true);
 
-    if (table_exists_internal(full_table_name)) {
-        
+    do_assert_value(OidIsValid(relid),
+                    "table \"%s\" does not exist",
+                    (text_to_cstring(full_table_name)));
+    
+    /* open the relation to get info */
+    rel = relation_open(relid, AccessShareLock);
+    td = RelationGetDescr(rel);
+
+    for (i = 0; i < td->natts; ++i)
+    {
+        if (strncmp(NameStr((td->attrs[i])->attname), text_to_cstring(column_name), NAMEDATALEN) == 0)
+        {
+            existence = true;
+            break;
+        }
+  
     }
-    return true;
+
+    relation_close(rel, AccessShareLock);
+    
+    PG_RETURN_BOOL(existence);
 }
 PG_FUNCTION_INFO_V1(column_exists);
 
@@ -308,11 +337,11 @@ PG_FUNCTION_INFO_V1(column_exists);
  */
 void assert_table(PG_FUNCTION_ARGS)
 {
-    text*    full_table_name;
-    bool     existence;
-    text*    err_msg;
-    text*    msg1;
-    text*    msg2;
+    text        *full_table_name;
+    bool         existence;
+    text        *err_msg;
+    text        *msg1;
+    text        *msg2;
 
     full_table_name = PG_GETARG_TEXT_PP(0);
     existence = PG_GETARG_BOOL(1);
@@ -320,18 +349,15 @@ void assert_table(PG_FUNCTION_ARGS)
     err_msg = cstring_to_text("assertion failure. Table: ");
     msg1 = cstring_to_text(" does not exist");
     msg2 = cstring_to_text(" already exist");
-    err_msg = text_catenate(err_msg, full_table_name);
+    err_msg = text_catenate_internal(err_msg, full_table_name);
 
     if (existence)
-        err_msg = text_catenate(err_msg, msg1);
+        err_msg = text_catenate_internal(err_msg, msg1);
     else
-        err_msg = text_catenate(err_msg, msg2);
+        err_msg = text_catenate_internal(err_msg, msg2);
 
-    if (table_exists_internal(full_table_name) != existence) {
-        ereport(ERROR,
-                (errcode(ERRCODE_RAISE_EXCEPTION),
-                 errmsg(text_to_cstring(err_msg))));
-    }
+    do_assert((table_exists_internal(full_table_name) == existence),
+              text_to_cstring(err_msg));
 }
 PG_FUNCTION_INFO_V1(assert_table);
 
@@ -345,30 +371,18 @@ PG_FUNCTION_INFO_V1(assert_table);
  */
 Datum strip_schema_name(PG_FUNCTION_ARGS)
 {
-    char*      full_table_name;
-    char*      short_table_name;
-    char*      str;    
-    char*      posn;
+    text      *full_table_name;
+    List      *names;
+    RangeVar  *rel;
 
-    if (PG_ARGISNULL(0))
-        ereport(ERROR,
-                (errcode(ERRCODE_RAISE_EXCEPTION),
-                 errmsg("Table name should not be null")));
+    do_assert(!PG_ARGISNULL(0),
+              "Table name should not be null");
 
-    full_table_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    posn = str = full_table_name;
+    full_table_name = PG_GETARG_TEXT_PP(0);
+    names = textToQualifiedNameList(full_table_name);
+    rel = makeRangeVarFromNameList(names);
 
-    for (; str != NULL && *str != '\0'; ++str)
-    {
-        /* get the position of DOT_CHAR in str */
-        if (*str == DOT_CHAR)
-            posn = str;
-    }
-    
-    short_table_name = (char *)palloc(sizeof(char) * (str - posn));
-    strcpy(short_table_name, ++posn);
-
-    PG_RETURN_TEXT_P(cstring_to_text(short_table_name));
+    PG_RETURN_TEXT_P(cstring_to_text(rel->relname));
 }
 PG_FUNCTION_INFO_V1(strip_schema_name);
 
@@ -386,47 +400,51 @@ PG_FUNCTION_INFO_V1(strip_schema_name);
  */
 Datum get_schema_name(PG_FUNCTION_ARGS)
 {
-    char*      full_table_name;
-    char*      schema_name;
-    char*      short_table_name;
-    char*      str;
-    char*      posn;
-    List*      search_path        = fetch_search_path(false);
-    char*      nspname;
-    
-    if (PG_ARGISNULL(0))
-        ereport(ERROR,
-                (errcode(ERRCODE_RAISE_EXCEPTION),
-                 errmsg("Table name should not be null")));
+    text      *full_table_name;
+    List      *names;
+    RangeVar  *rel;
+    char      *nspname;
+    List      *search_path = fetch_search_path(false);
 
-    full_table_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    posn = str = full_table_name;
+    do_assert(!PG_ARGISNULL(0),
+              "Table name should not be null"
+              );
 
-    for(; str != NULL && *str != '\0'; ++str) {
-        if (*str == DOT_CHAR)
-            posn = str;
-    }
+    full_table_name = PG_GETARG_TEXT_PP(0);
+    names = textToQualifiedNameList(full_table_name);
+    rel = makeRangeVarFromNameList(names);
 
-    schema_name = (char *)palloc(sizeof(char) * (posn - full_table_name));
-    strncpy(schema_name, full_table_name, posn - full_table_name);
-    short_table_name = (char *)palloc(sizeof(char) * (str - posn));
-    strcpy(short_table_name, ++posn);
-
-    if (schema_name == NULL) {
-        /*
-         * might have several search paths
-         */
-        if (table_exists_internal(full_table_name))
+    if (rel->schemaname)
+        /* get schema name directly */
+        PG_RETURN_TEXT_P(cstring_to_text(rel->schemaname));
+    else
+    {
+        /* table exists */
+        if (OidIsValid(rel))
         {
-            if (search_path == NIL)
-                PG_RETURN_NULL();
-            nspname = get_namespace_name(linitial_oid(search_path));
-            list_free(search_path);
-            if (!nspname)
-                PG_RETURN_NULL();       /* recently-deleted namespace? */
-            PG_RETURN_TEXT_P(cstring_to_text(nspname));
-        }
+            /* might have several search paths, table is in one of them */
+            Oid        relid;
+            Oid        nspid;
+            
+            relid = RelnameGetRelid(rel->relname);
+            nspid = get_rel_namespace(relid);
+            nspname = get_namespace_name(nspid);
 
+            if (nspname)
+                PG_RETURN_TEXT_P(cstring_to_text(nspname));
+        }
+        
+        /*
+         * Table exists, but not in provided search paths
+         * Return current namespace instead
+         */
+        if (search_path == NIL)
+            PG_RETURN_NULL();
+        nspname = get_namespace_name(linitial_oid(search_path));
+        list_free(search_path);
+        if (!nspname)
+            PG_RETURN_NULL();		/* recently-deleted namespace? */
+        PG_RETURN_TEXT_P(cstring_to_text(nspname));
     }
 }
 PG_FUNCTION_INFO_V1(get_schema_name);
@@ -451,6 +469,7 @@ Datum csvstr_to_array(PG_FUNCTION_ARGS)
     char            *start_ptr = NULL;
     char            *str = NULL;
     char            *orig_str = NULL;
+    int              orig_str_len;
     int              posn = 0;
     int              chunk_len = 0;
     text            *result_text;
@@ -460,17 +479,17 @@ Datum csvstr_to_array(PG_FUNCTION_ARGS)
         PG_RETURN_NULL();
 
     inputstring = PG_GETARG_TEXT_PP(0);
-    inputstring_len =  VARSIZE_ANY_EXHDR(inputstring);
+    inputstring_len = VARSIZE_ANY_EXHDR(inputstring);
 
     /* return empty array for empty input string */
     if (inputstring_len < 1)
         PG_RETURN_ARRAYTYPE_P(construct_empty_array(TEXTOID));
 
     /* start_ptr points to the start_posn'th character of inputstring */
-
     orig_str = str_tolower(VARDATA_ANY(inputstring),
-                      inputstring_len,
-                      PG_GET_COLLATION());
+                           inputstring_len,
+                           PG_GET_COLLATION());
+    orig_str_len = strlen(orig_str);
     str = orig_str;
     start_ptr = str;
     
@@ -497,7 +516,6 @@ Datum csvstr_to_array(PG_FUNCTION_ARGS)
     }
 
     /* field after the last COMMA_CHAR */
-    chunk_len = inputstring_len - posn;
     start_ptr = btrim_internal(start_ptr, &chunk_len);
     result_text = cstring_to_text_with_len(start_ptr, chunk_len);
     astate = accumArrayResult(astate,
@@ -512,3 +530,244 @@ Datum csvstr_to_array(PG_FUNCTION_ARGS)
 										  CurrentMemoryContext));
 }
 PG_FUNCTION_INFO_V1(csvstr_to_array);
+
+/*
+ * @brief Get the number of columns for a given table.
+ *
+ * @param table_name    The full table name.      
+ * 
+ * @return The number of columns in the given table. 
+ *
+ */
+Datum num_of_columns(PG_FUNCTION_ARGS)
+{
+    text            *table_name;
+    List            *names;
+    Oid              relid;
+    HeapTuple        relTup;
+    Form_pg_class    relForm;
+    int              result;
+
+    do_assert(!PG_ARGISNULL(0),
+              "Table name should not be null");
+
+    table_name = PG_GETARG_TEXT_PP(0);
+    names = textToQualifiedNameList(table_name);
+    relid = RangeVarGetRelid(makeRangeVarFromNameList(names), true);
+
+    /* check whether table exists */
+    do_assert_value(OidIsValid(relid),
+              "table \"%s\"does not exist",
+              (text_to_cstring(table_name)));
+
+    relTup = SearchSysCache1(RELOID,
+							 ObjectIdGetDatum(relid));
+    relForm = (Form_pg_class) GETSTRUCT(relTup);
+    result = relForm->relnatts;
+
+    ReleaseSysCache(relTup);
+
+    PG_RETURN_INT32(result);
+}
+PG_FUNCTION_INFO_V1(num_of_columns);
+
+/*
+ * @brief Test if each element in the given array is a column of the table.
+ *
+ * @param column_names      The array containing the columns to be tested.
+ * @param table_name        The full table name.
+ * 
+ * @return True if each element of column_names is a column of the table.
+ *
+ */
+Datum columns_in_table(PG_FUNCTION_ARGS)
+{
+    ArrayType         *column_names;
+    text              *full_table_name;
+    List              *names;
+    Oid                relid;
+    Relation           rel;
+    TupleDesc          td;
+    bool               existence;
+    bool               all_in;
+    int                i;
+    int                j;
+    int                ndims;
+    int                nitems;
+    int               *dims;
+    int                typlen;
+    bool               typbyval;
+    char               typalign;
+    char              *ptr;
+    Oid                element_type;
+    TypeCacheEntry    *typentry;
+    Datum              elt;
+
+    if (PG_ARGISNULL(0))
+        PG_RETURN_BOOL(false);
+    if (PG_ARGISNULL(1))
+        PG_RETURN_BOOL(false);
+
+
+    full_table_name = PG_GETARG_TEXT_PP(0);
+    column_names = PG_GETARG_ARRAYTYPE_P(1);
+
+    ndims = ARR_NDIM(column_names);
+    element_type = ARR_ELEMTYPE(column_names);
+
+    if (ndims == 0)
+        PG_RETURN_BOOL(false);
+
+    dims = ARR_DIMS(column_names);
+    ptr = ARR_DATA_PTR(column_names);
+    nitems = ArrayGetNItems(ndims, dims);
+
+    /*
+	 * We arrange to look up the equality function only once per series of
+	 * calls, assuming the element type doesn't change underneath us.  The
+	 * typcache is used so that we have no memory leakage when being used as
+	 * an index support function.
+	 */
+    typentry = (TypeCacheEntry *) fcinfo->flinfo->fn_extra;
+    if (typentry == NULL ||	typentry->type_id != element_type)
+    {
+        typentry = lookup_type_cache(element_type, TYPECACHE_EQ_OPR_FINFO);
+        fcinfo->flinfo->fn_extra = (void *) typentry;
+    }
+    typlen = typentry->typlen;
+    typbyval = typentry->typbyval;
+    typalign = typentry->typalign;
+    
+    names = textToQualifiedNameList(full_table_name);
+    relid = RangeVarGetRelid(makeRangeVarFromNameList(names), true);
+
+    do_assert_value(OidIsValid(relid),
+                    "table \"%s\" does not exist",
+                    (text_to_cstring(full_table_name)));
+    
+    /* open the relation to get info */
+    rel = relation_open(relid, AccessShareLock);
+    td = RelationGetDescr(rel);
+
+    /* Compare each column name got from input and from tuple descriptor */
+    all_in = true;
+    for (i = 0; i < nitems; ++i)
+    {
+        elt = fetch_att(ptr, typbyval, typlen);
+        ptr = att_addlength_pointer(ptr, typlen, ptr);
+        ptr = (char *) att_align_nominal(ptr, typalign);
+        existence = false;
+
+        for (j = 0; j < td->natts; ++j)
+        {
+            if (strncmp(NameStr((td->attrs[j])->attname), text_to_cstring(DatumGetTextPP(elt)), NAMEDATALEN) == 0)
+            {
+                existence = true;
+                break;
+            }
+        }
+        if (existence == false)
+        {
+            all_in = false;
+            break;
+        }
+    }
+    
+    relation_close(rel, AccessShareLock);
+    PG_FREE_IF_COPY(column_names, 0);
+
+    PG_RETURN_BOOL(all_in);
+}
+PG_FUNCTION_INFO_V1(columns_in_table);
+
+Datum mad_array_search(PG_FUNCTION_ARGS)
+{
+    bool            result;
+    Datum           find;
+    Datum           elt;
+    ArrayType      *arr;
+    Oid             collation;
+    bool            contains;
+    Oid             element_type;
+    TypeCacheEntry *typentry;
+    int             nitems;
+    int             typlen;
+    bool            typbyval;
+    char            typalign;
+    char           *ptr;
+    int             i;
+    FunctionCallInfoData  locfcinfo;
+
+    if (PG_ARGISNULL(0))
+        PG_RETURN_BOOL(false);
+    if (PG_ARGISNULL(1))
+        PG_RETURN_BOOL(false);
+
+    find = PG_GETARG_DATUM(0);
+    arr = PG_GETARG_ARRAYTYPE_P(1);
+    collation = PG_GET_COLLATION();
+
+    /* Check type, only compare find and arr element of the same type */
+    element_type = ARR_ELEMTYPE(arr);
+
+    /* We don't use here because errcode are different */
+    if (element_type != get_fn_expr_argtype(fcinfo->flinfo, 1))
+    {
+        ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("cannot compare arrays of different element types")));
+    }
+
+    /*
+	 * We arrange to look up the equality function only once per series of
+	 * calls, assuming the element type doesn't change underneath us.  The
+	 * typcache is used so that we have no memory leakage when being used as
+	 * an index support function.
+	 */
+    typentry = (TypeCacheEntry *) fcinfo->flinfo->fn_extra;
+    if (typentry == NULL || typentry->type_id != element_type)
+	{
+		typentry = lookup_type_cache(element_type, TYPECACHE_EQ_OPR_FINFO);
+		if (!OidIsValid(typentry->eq_opr_finfo.fn_oid))
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_FUNCTION),
+                     errmsg("could not identify an equality operator for type %s",
+                            format_type_be(element_type))));
+		fcinfo->flinfo->fn_extra = (void *) typentry;
+	}
+	typlen = typentry->typlen;
+	typbyval = typentry->typbyval;
+	typalign = typentry->typalign;
+
+	/* Apply the comparison operator to each pair of array elements. */
+	InitFunctionCallInfoData(locfcinfo, &typentry->eq_opr_finfo, 2, collation, NULL, NULL);
+
+    /* Loop over source array */
+    nitems = ArrayGetNItems(ARR_NDIM(arr), ARR_DIMS(arr));
+    ptr = ARR_DATA_PTR(arr);
+    contains = false;
+    
+    for (i = 0; i < nitems; ++i)
+    {
+        elog(WARNING, text_to_cstring(DatumGetTextPP(find)));
+
+        elt = fetch_att(ptr, typbyval, typlen);
+        ptr = att_addlength_pointer(ptr, typlen, ptr);
+        ptr = (char *) att_align_nominal(ptr, typalign);
+
+        /* Apply the operator to the element pair */
+        locfcinfo.arg[0] = find;
+        locfcinfo.arg[1] = elt;
+        locfcinfo.argnull[0] = false;
+        locfcinfo.argnull[1] = false;
+        locfcinfo.isnull = false;
+        contains = DatumGetBool(FunctionCallInvoke(&locfcinfo));
+        if (contains)
+            break;
+    }
+    
+    PG_FREE_IF_COPY(arr, 1);
+
+    PG_RETURN_BOOL(contains);
+}
+PG_FUNCTION_INFO_V1(array_search);
