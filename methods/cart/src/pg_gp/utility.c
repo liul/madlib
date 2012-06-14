@@ -44,63 +44,25 @@ PG_MODULE_MAGIC;
 #define COMMA_CHAR ','
 #define SPACE_CHAR ' '
 
-#define do_assert(condition, message) \
-			do { \
-				if (!(condition)) \
-					ereport(ERROR, \
-							(errcode(ERRCODE_RAISE_EXCEPTION), \
-							 errmsg(message) \
-							) \
-						   ); \
-			} while (0)
+#define mad_do_assert(condition, message) \
+    do {                                                \
+        if (!(condition))                               \
+            ereport(ERROR,                              \
+                    (errcode(ERRCODE_RAISE_EXCEPTION),  \
+                     errmsg(message)                    \
+                     )                                  \
+                    );                                  \
+    } while (0)
 
-#define do_assert_value(condition, message, value)          \
-			do { \
-				if (!(condition)) \
-					ereport(ERROR, \
-							(errcode(ERRCODE_RAISE_EXCEPTION), \
-							 errmsg(message, (value))          \
-							) \
-						   ); \
-			} while (0)
-
-/*
- * Catenate t1 and t2 of text*.
- *
- * Arguments can be in short-header form, but not compressed or out-of-line
- */
-static text* text_catenate_internal(text *t1, text *t2)
-{
-	text	   *result;
-	int			len1,
-				len2,
-				len;
-	char	   *ptr;
-
-	len1 = VARSIZE_ANY_EXHDR(t1);
-	len2 = VARSIZE_ANY_EXHDR(t2);
-
-	/* paranoia ... probably should throw error instead? */
-	if (len1 < 0)
-		len1 = 0;
-	if (len2 < 0)
-		len2 = 0;
-
-	len = len1 + len2 + VARHDRSZ;
-	result = (text *) palloc(len);
-
-	/* Set size of result string... */
-	SET_VARSIZE(result, len);
-
-	/* Fill data field of result string... */
-	ptr = VARDATA(result);
-	if (len1 > 0)
-		memcpy(ptr, VARDATA_ANY(t1), len1);
-	if (len2 > 0)
-		memcpy(ptr + len1, VARDATA_ANY(t2), len2);
-
-	return result;
-}
+#define mad_do_assert_value(condition, message, value)  \
+    do {                                                \
+        if (!(condition))                               \
+            ereport(ERROR,                              \
+                    (errcode(ERRCODE_RAISE_EXCEPTION),  \
+                     errmsg(message, (value))           \
+                     )                                  \
+                    );                                  \
+    } while (0)
 
 static bool table_exists_internal(text* full_table_name)
 {
@@ -155,7 +117,7 @@ static char* btrim_internal(char* string, int* string_len)
  * @note Greenplum doesn't support boolean to text casting.
  *
  */
-Datum to_char(PG_FUNCTION_ARGS)
+Datum mad_to_char(PG_FUNCTION_ARGS)
 {
     bool        input;
     char       *result;
@@ -173,7 +135,7 @@ Datum to_char(PG_FUNCTION_ARGS)
 
     PG_RETURN_TEXT_P(cstring_to_text(result));
 }
-PG_FUNCTION_INFO_V1(to_char);
+PG_FUNCTION_INFO_V1(mad_to_char);
 
 /*
  * @brief Cast regclass to text. 
@@ -182,7 +144,7 @@ PG_FUNCTION_INFO_V1(to_char);
  * @return The text representation for the regclass.
  *
  */
-Datum regclass_to_text(PG_FUNCTION_ARGS)
+Datum mad_regclass_to_text(PG_FUNCTION_ARGS)
 {
     Oid         classid = PG_GETARG_OID(0);
     char       *result;
@@ -232,7 +194,7 @@ Datum regclass_to_text(PG_FUNCTION_ARGS)
     
     PG_RETURN_TEXT_P(cstring_to_text(result));
 }
-PG_FUNCTION_INFO_V1(regclass_to_text);
+PG_FUNCTION_INFO_V1(mad_regclass_to_text);
 
 /*
  * @brief Raise exception if the condition is false.
@@ -241,7 +203,7 @@ PG_FUNCTION_INFO_V1(regclass_to_text);
  * @param reason		The reason string displayed when assert failure.
  *
  */
-void assert(PG_FUNCTION_ARGS)
+void mad_assert(PG_FUNCTION_ARGS)
 {
     bool        condition;
     text       *reason;
@@ -249,11 +211,11 @@ void assert(PG_FUNCTION_ARGS)
     condition = PG_GETARG_BOOL(0);
     reason = PG_GETARG_TEXT_PP(1);
     
-    do_assert(condition,
-              text_to_cstring(reason));
+    mad_do_assert(condition,
+                  text_to_cstring(reason));
               
 }
-PG_FUNCTION_INFO_V1(assert);
+PG_FUNCTION_INFO_V1(mad_assert);
 
 /*
  * @brief This function checks whether the specified table exists or not.
@@ -262,7 +224,7 @@ PG_FUNCTION_INFO_V1(assert);
  *
  * @return A boolean value indicating whether the table exists or not.
  */
-Datum table_exists(PG_FUNCTION_ARGS)
+Datum mad_table_exists(PG_FUNCTION_ARGS)
 {
     text           *input;
 
@@ -273,7 +235,7 @@ Datum table_exists(PG_FUNCTION_ARGS)
     
     PG_RETURN_BOOL(table_exists_internal(input));
 }
-PG_FUNCTION_INFO_V1(table_exists);
+PG_FUNCTION_INFO_V1(mad_table_exists);
 
 /*
  * @brief Test if the specified column exists or not.
@@ -283,7 +245,7 @@ PG_FUNCTION_INFO_V1(table_exists);
  * @return True if the column exists, otherwise return false.
  *
  */
-Datum column_exists(PG_FUNCTION_ARGS)
+Datum mad_column_exists(PG_FUNCTION_ARGS)
 {
     text              *full_table_name;
     text              *column_name;
@@ -305,9 +267,9 @@ Datum column_exists(PG_FUNCTION_ARGS)
     names = textToQualifiedNameList(full_table_name);
     relid = RangeVarGetRelid(makeRangeVarFromNameList(names), true);
 
-    do_assert_value(OidIsValid(relid),
-                    "table \"%s\" does not exist",
-                    (text_to_cstring(full_table_name)));
+    mad_do_assert_value(OidIsValid(relid),
+                        "table \"%s\" does not exist",
+                        (text_to_cstring(full_table_name)));
     
     /* open the relation to get info */
     rel = relation_open(relid, AccessShareLock);
@@ -327,7 +289,7 @@ Datum column_exists(PG_FUNCTION_ARGS)
     
     PG_RETURN_BOOL(existence);
 }
-PG_FUNCTION_INFO_V1(column_exists);
+PG_FUNCTION_INFO_V1(mad_column_exists);
 
 /*
  * @brief Assert if the specified table exists or not.
@@ -335,31 +297,24 @@ PG_FUNCTION_INFO_V1(column_exists);
  * @param full_table_name	The full table name.
  *
  */
-void assert_table(PG_FUNCTION_ARGS)
+void mad_assert_table(PG_FUNCTION_ARGS)
 {
     text        *full_table_name;
     bool         existence;
-    text        *err_msg;
-    text        *msg1;
-    text        *msg2;
 
     full_table_name = PG_GETARG_TEXT_PP(0);
     existence = PG_GETARG_BOOL(1);
 
-    err_msg = cstring_to_text("assertion failure. Table: ");
-    msg1 = cstring_to_text(" does not exist");
-    msg2 = cstring_to_text(" already exist");
-    err_msg = text_catenate_internal(err_msg, full_table_name);
-
     if (existence)
-        err_msg = text_catenate_internal(err_msg, msg1);
+        mad_do_assert_value((table_exists_internal(full_table_name) == existence),
+                            "Assertion failure. Talbe \"%s\" does not exit.",
+                            (text_to_cstring(full_table_name)));
     else
-        err_msg = text_catenate_internal(err_msg, msg2);
-
-    do_assert((table_exists_internal(full_table_name) == existence),
-              text_to_cstring(err_msg));
+        mad_do_assert_value((table_exists_internal(full_table_name) == existence),
+                            "Assertion failure. Talbe \"%s\" already exit.",
+                            (text_to_cstring(full_table_name)));
 }
-PG_FUNCTION_INFO_V1(assert_table);
+PG_FUNCTION_INFO_V1(mad_assert_table);
 
 /*
  * @brief  Strip the schema name from the full table name.
@@ -369,14 +324,14 @@ PG_FUNCTION_INFO_V1(assert_table);
  * @return The table name without schema name.
  *
  */
-Datum strip_schema_name(PG_FUNCTION_ARGS)
+Datum mad_strip_schema_name(PG_FUNCTION_ARGS)
 {
     text      *full_table_name;
     List      *names;
     RangeVar  *rel;
 
-    do_assert(!PG_ARGISNULL(0),
-              "Table name should not be null");
+    mad_do_assert(!PG_ARGISNULL(0),
+                  "Table name should not be null");
 
     full_table_name = PG_GETARG_TEXT_PP(0);
     names = textToQualifiedNameList(full_table_name);
@@ -384,7 +339,7 @@ Datum strip_schema_name(PG_FUNCTION_ARGS)
 
     PG_RETURN_TEXT_P(cstring_to_text(rel->relname));
 }
-PG_FUNCTION_INFO_V1(strip_schema_name);
+PG_FUNCTION_INFO_V1(mad_strip_schema_name);
 
 /*
  * @brief Get the schema name from a full table name.
@@ -398,7 +353,7 @@ PG_FUNCTION_INFO_V1(strip_schema_name);
  * @return The schema name of the table.
  *
  */
-Datum get_schema_name(PG_FUNCTION_ARGS)
+Datum mad_get_schema_name(PG_FUNCTION_ARGS)
 {
     text      *full_table_name;
     List      *names;
@@ -406,9 +361,8 @@ Datum get_schema_name(PG_FUNCTION_ARGS)
     char      *nspname;
     List      *search_path = fetch_search_path(false);
 
-    do_assert(!PG_ARGISNULL(0),
-              "Table name should not be null"
-              );
+    mad_do_assert(!PG_ARGISNULL(0),
+                  "Table name should not be null");
 
     full_table_name = PG_GETARG_TEXT_PP(0);
     names = textToQualifiedNameList(full_table_name);
@@ -447,7 +401,7 @@ Datum get_schema_name(PG_FUNCTION_ARGS)
         PG_RETURN_TEXT_P(cstring_to_text(nspname));
     }
 }
-PG_FUNCTION_INFO_V1(get_schema_name);
+PG_FUNCTION_INFO_V1(mad_get_schema_name);
 
 /*
  * @brief Convert a string with delimiter ',' to an array. 
@@ -462,7 +416,7 @@ PG_FUNCTION_INFO_V1(get_schema_name);
  *       after trimmed with ' ', then NULL will be returned.
  *
  */
-Datum csvstr_to_array(PG_FUNCTION_ARGS)
+Datum mad_csvstr_to_array(PG_FUNCTION_ARGS)
 {
     text            *inputstring;
     int              inputstring_len;
@@ -529,7 +483,7 @@ Datum csvstr_to_array(PG_FUNCTION_ARGS)
     PG_RETURN_ARRAYTYPE_P(makeArrayResult(astate,
 										  CurrentMemoryContext));
 }
-PG_FUNCTION_INFO_V1(csvstr_to_array);
+PG_FUNCTION_INFO_V1(mad_csvstr_to_array);
 
 /*
  * @brief Get the number of columns for a given table.
@@ -539,7 +493,7 @@ PG_FUNCTION_INFO_V1(csvstr_to_array);
  * @return The number of columns in the given table. 
  *
  */
-Datum num_of_columns(PG_FUNCTION_ARGS)
+Datum mad_num_of_columns(PG_FUNCTION_ARGS)
 {
     text            *table_name;
     List            *names;
@@ -548,17 +502,17 @@ Datum num_of_columns(PG_FUNCTION_ARGS)
     Form_pg_class    relForm;
     int              result;
 
-    do_assert(!PG_ARGISNULL(0),
-              "Table name should not be null");
+    mad_do_assert(!PG_ARGISNULL(0),
+                  "Table name should not be null");
 
     table_name = PG_GETARG_TEXT_PP(0);
     names = textToQualifiedNameList(table_name);
     relid = RangeVarGetRelid(makeRangeVarFromNameList(names), true);
 
     /* check whether table exists */
-    do_assert_value(OidIsValid(relid),
-              "table \"%s\"does not exist",
-              (text_to_cstring(table_name)));
+    mad_do_assert_value(OidIsValid(relid),
+                        "table \"%s\"does not exist",
+                        (text_to_cstring(table_name)));
 
     relTup = SearchSysCache1(RELOID,
 							 ObjectIdGetDatum(relid));
@@ -569,7 +523,7 @@ Datum num_of_columns(PG_FUNCTION_ARGS)
 
     PG_RETURN_INT32(result);
 }
-PG_FUNCTION_INFO_V1(num_of_columns);
+PG_FUNCTION_INFO_V1(mad_num_of_columns);
 
 /*
  * @brief Test if each element in the given array is a column of the table.
@@ -580,7 +534,7 @@ PG_FUNCTION_INFO_V1(num_of_columns);
  * @return True if each element of column_names is a column of the table.
  *
  */
-Datum columns_in_table(PG_FUNCTION_ARGS)
+Datum mad_columns_in_table(PG_FUNCTION_ARGS)
 {
     ArrayType         *column_names;
     text              *full_table_name;
@@ -641,9 +595,9 @@ Datum columns_in_table(PG_FUNCTION_ARGS)
     names = textToQualifiedNameList(full_table_name);
     relid = RangeVarGetRelid(makeRangeVarFromNameList(names), true);
 
-    do_assert_value(OidIsValid(relid),
-                    "table \"%s\" does not exist",
-                    (text_to_cstring(full_table_name)));
+    mad_do_assert_value(OidIsValid(relid),
+                        "table \"%s\" does not exist",
+                        (text_to_cstring(full_table_name)));
     
     /* open the relation to get info */
     rel = relation_open(relid, AccessShareLock);
@@ -678,11 +632,19 @@ Datum columns_in_table(PG_FUNCTION_ARGS)
 
     PG_RETURN_BOOL(all_in);
 }
-PG_FUNCTION_INFO_V1(columns_in_table);
+PG_FUNCTION_INFO_V1(mad_columns_in_table);
 
+/*
+ * @brief Test if the given element is in the specified array or not.
+ *
+ * @param find      The element to be found.
+ * @param arr       The array containing the elements.
+ * 
+ * @return True the element is in the array. Otherwise returns false.
+ *
+ */
 Datum mad_array_search(PG_FUNCTION_ARGS)
 {
-    bool            result;
     Datum           find;
     Datum           elt;
     ArrayType      *arr;
@@ -706,17 +668,9 @@ Datum mad_array_search(PG_FUNCTION_ARGS)
     find = PG_GETARG_DATUM(0);
     arr = PG_GETARG_ARRAYTYPE_P(1);
     collation = PG_GET_COLLATION();
-
+    
     /* Check type, only compare find and arr element of the same type */
     element_type = ARR_ELEMTYPE(arr);
-
-    /* We don't use here because errcode are different */
-    if (element_type != get_fn_expr_argtype(fcinfo->flinfo, 1))
-    {
-        ereport(ERROR,
-				(errcode(ERRCODE_DATATYPE_MISMATCH),
-				 errmsg("cannot compare arrays of different element types")));
-    }
 
     /*
 	 * We arrange to look up the equality function only once per series of
@@ -729,6 +683,7 @@ Datum mad_array_search(PG_FUNCTION_ARGS)
 	{
 		typentry = lookup_type_cache(element_type, TYPECACHE_EQ_OPR_FINFO);
 		if (!OidIsValid(typentry->eq_opr_finfo.fn_oid))
+            /* We don't use here because errcode are different */
 			ereport(ERROR,
 					(errcode(ERRCODE_UNDEFINED_FUNCTION),
                      errmsg("could not identify an equality operator for type %s",
@@ -749,8 +704,6 @@ Datum mad_array_search(PG_FUNCTION_ARGS)
     
     for (i = 0; i < nitems; ++i)
     {
-        elog(WARNING, text_to_cstring(DatumGetTextPP(find)));
-
         elt = fetch_att(ptr, typbyval, typlen);
         ptr = att_addlength_pointer(ptr, typlen, ptr);
         ptr = (char *) att_align_nominal(ptr, typalign);
@@ -770,4 +723,4 @@ Datum mad_array_search(PG_FUNCTION_ARGS)
 
     PG_RETURN_BOOL(contains);
 }
-PG_FUNCTION_INFO_V1(array_search);
+PG_FUNCTION_INFO_V1(mad_array_search);
