@@ -76,39 +76,6 @@ static bool table_exists_internal(text* full_table_name)
 }
 
 /*
- * Remove the longest string consisting only SPACE_CHAR
- * from the start and end of input string
- */
-static char* btrim_internal(char* string, int* string_len)
-{
-    if (string_len > 0)
-    {
-        /* remove left spaces */
-        while (string_len > 0)
-        {
-            if (*string == SPACE_CHAR)
-            {
-                string++;
-                (*string_len)--;
-            }
-            else
-                break;
-        }
-        /* remove right spaces */
-        while (string_len > 0)
-        {
-            if (string[*string_len - 1] == SPACE_CHAR)
-            {
-                (*string_len)--;
-            }
-            else
-                break;
-        }
-    }
-    return string;
-}
-
-/*
  * @brief Use % as the delimiter to split the given string. The char '\' is used
  *        to escape %. We will not change the default behavior of '\' in PG/GP.
  *        For example, assume the given string is E"\\\\\\\\\\%123%123". Then it only
