@@ -109,6 +109,211 @@ static char* btrim_internal(char* string, int* string_len)
 }
 
 /*
+ * @brief Use % as the delimiter to split the given string. The char '\' is used
+ *        to escape %. We will not change the default behavior of '\' in PG/GP.
+ *        For example, assume the given string is E"\\\\\\\\\\%123%123". Then it only
+ *        has one delimiter; the string will be split to two substrings:
+ *        E'\\\\\\\\\\%123' and '123'; the position array size is 1, where position[0] = 9;
+ *        ; (*len) = 13.
+ *
+ * @param str       The string to be split.
+ * @param position  An array to store the position of each un-escaped % in the string.
+ * @param num_pos   The expected number of un-escaped %s in the string.
+ * @param len       The length of the string. It doesn't include the terminal.
+ *
+ * @return The position array which records the positions of all un-escaped %s
+ *         in the give string.
+ *
+ * @note If the number of %s in the string is not equal to the expected number,
+ *       we will report error via elog.
+ */
+static
+int*
+mad_split_string
+	(
+	char *str,
+	int  *position,
+    int  num_pos,
+	int  *len
+	)
+{
+	int i 				  = 0;
+	int j 				  = 0;
+	
+	/* the number of the escape chars which occur continuously */
+	int num_cont_escapes  = 0;
+
+	for(; str != NULL && *str != '\0'; ++str, ++j)
+	{
+		if ('%' == *str)
+		{
+			/*
+			 * if the number of the escapes is even number
+			 * then no need to escape. Otherwise escape the delimiter
+			 */
+			if (!(num_cont_escapes & 0x01))
+			{
+            	mad_do_assert
+	            	(
+                        i < num_pos,
+                        "the number of the elements in the array is less than "
+                        "the format string expects."
+                    );
+
+				/*  convert the char '%' to '\0' */
+				position[i++] 	= j;
+				*str 			= '\0';
+			}
+
+			/* reset the number of the continuous escape chars */
+			num_cont_escapes = 0;
+		}
+		else if ('\\' == *str)
+		{
+			/* increase the number of continuous escape chars */
+			++num_cont_escapes;
+		}
+		else
+		{
+			/* reset the number of the continuous escape chars */
+			num_cont_escapes = 0;
+		}
+	}
+
+	*len      = j;
+	
+    mad_do_assert
+        (
+            i == num_pos,
+            "the number of the elements in the array is greater than "
+            "the format string expects. "
+        );
+
+	return position;
+}
+
+
+/*
+ * @brief Change all occurrences of '\%' in the give string to '%'. Our split
+ *        method will ensure that the char immediately before a '%' must be a '\'.
+ *        We traverse the string from left to right, if we meet a '%', then
+ *        move the substring after the current '\%' to the right place until
+ *        we meet next '\%' or the '\0'. Finally, set the terminal symbol for
+ *        the replaced string.
+ *
+ * @param str   The null terminated string to be escaped.
+ *              The char immediately before a '%' must be a '\'.
+ *
+ * @return The new string with \% changed to %.
+ *
+ */
+static
+char*
+mad_escape_pct_sym
+	(
+	char *str
+	)
+{
+	int num_escapes		  = 0;
+
+	/* remember the start address of the escaped string */
+	char *p_new_string 	 = str;
+
+	while(str != NULL && *str != '\0')
+	{
+		if ('%' == *str)
+		{
+			mad_do_assert_value
+				(
+					(str - 1) && ('\\' == *(str - 1)),
+					"The char immediately before a %s must be a \\",
+					"%"
+				);
+
+			/*
+			 * The char immediately before % is \
+			 * increase the number of escape chars
+			 */
+			++num_escapes;
+			do
+			{
+				/*
+				 * move the string which is between the current "\%"
+				 * and next "\%"
+				 */
+				*(str - num_escapes) = *str;
+				++str;
+			} while (str != NULL && *str != '\0' && *str != '%');
+		}
+		else
+		{
+			++str;
+		}
+	}
+
+	/* if there is no escapes, then set the end symbol for the string */
+	if (num_escapes > 0)
+		*(str - num_escapes) = '\0';
+
+	return p_new_string;
+}
+
+/*
+ * The guts of mad_format. Takes a cstring fmt and cstring array
+ * arrgs_array and build the query string.
+ */
+static text* mad_format_internal(char *fmt, char **args_array, int nargs)
+{
+    int            *position = (int *) palloc0(nargs * sizeof(int));
+    int             last_posn = 0;
+    int             fmt_len = 0;
+    int             i;
+    char           *ptr;
+    StringInfoData  buf;
+    
+    /*
+	 * split the format string, so that later we can replace the delimiters
+	 * with the given arguments
+	 */
+
+	mad_split_string(fmt, position, nargs, &fmt_len);
+    initStringInfo(&buf);
+
+    for (i = 0; i < nargs; i++)
+    {
+        /* There is no string befor the delimiter. */
+        if (last_posn == position[i])
+        {
+            appendStringInfo(&buf, "%s", DatumGetCString(args_array[i]));
+            ++last_posn;
+        }
+        else
+        {
+            /*
+			 * has a string before the delimiter
+			 * we replace "\%" in the string to "%", since "%" is escaped
+			 * then combine the string and argument string together
+			 */
+            appendStringInfo
+				(
+                 &buf,
+                 "%s%s",
+                 mad_escape_pct_sym(fmt + last_posn),
+                 args_array[i]
+                 );
+
+			last_posn = position[i] + 1;
+        }
+    }
+    /* The last char in the format string is not delimiter. */
+	if (last_posn < fmt_len)
+		appendStringInfo(&buf, "%s", fmt + last_posn);
+
+    pfree(position);
+    return cstring_to_text_with_len(buf.data, buf.len);
+}
+
+/*
  * @brief Cast any value to text.
  *
  * @param val	A value with any specific type.
@@ -452,8 +657,7 @@ Datum mad_csvstr_to_array(PG_FUNCTION_ARGS)
         if (*str == COMMA_CHAR)
         {
             /* must build a temp text datum to pass to accumArrayResult */
-            start_ptr = btrim_internal(start_ptr, &chunk_len);
-            result_text = cstring_to_text_with_len(start_ptr, chunk_len);
+            result_text = DirectFunctionCall1(btrim1, cstring_to_text_with_len(start_ptr, chunk_len));
             /* stash away this field */
 			astate = accumArrayResult(astate,
 									  PointerGetDatum(result_text),
@@ -470,8 +674,7 @@ Datum mad_csvstr_to_array(PG_FUNCTION_ARGS)
     }
 
     /* field after the last COMMA_CHAR */
-    start_ptr = btrim_internal(start_ptr, &chunk_len);
-    result_text = cstring_to_text_with_len(start_ptr, chunk_len);
+    result_text = DirectFunctionCall1(btrim1, cstring_to_text_with_len(start_ptr, chunk_len));
     astate = accumArrayResult(astate,
                               PointerGetDatum(result_text),
                               false,
@@ -724,3 +927,273 @@ Datum mad_array_search(PG_FUNCTION_ARGS)
     PG_RETURN_BOOL(contains);
 }
 PG_FUNCTION_INFO_V1(mad_array_search);
+
+/*
+ * @brief Short form to format a string with a parameter.
+ *
+ * @param arg1	The first argument.
+ *
+ * @return The formated string.
+ *
+ */
+Datum mad_format1(PG_FUNCTION_ARGS)
+{
+    char        *fmt;
+    char        *arg1;
+    char       **args_array;
+    text        *result;
+    
+    mad_do_assert(!(PG_ARGISNULL(0) || PG_ARGISNULL(1)),
+                  "the format string and its arguments must not be null");
+    
+    fmt = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    arg1 = text_to_cstring(PG_GETARG_TEXT_PP(1));
+    
+    args_array = (char **) palloc0(sizeof(char *));
+    args_array[0] = arg1;
+
+    result = mad_format_internal(fmt, args_array, 1);
+    pfree(args_array);
+    pfree(arg1);
+    
+    PG_RETURN_TEXT_P(result);
+}
+PG_FUNCTION_INFO_V1(mad_format1);
+
+/*
+ * @brief Short form to format a string with two parameters.
+ *
+ * @param arg1	The first argument.
+ * @param arg2	The second argument.
+ *
+ * @return The formated string.
+ *
+ */
+Datum mad_format2(PG_FUNCTION_ARGS)
+{
+    char        *fmt;
+    char        *arg1;
+    char        *arg2;
+    char       **args_array;
+    text        *result;
+    
+    mad_do_assert(!(PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2)),
+                  "the format string and its arguments must not be null");
+    
+    fmt = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    arg1 = text_to_cstring(PG_GETARG_TEXT_PP(1));
+    arg2 = text_to_cstring(PG_GETARG_TEXT_PP(2));
+    
+    args_array = (char **) palloc0(2 * sizeof(char *));
+    args_array[0] = arg1;
+    args_array[1] = arg2;
+
+    result = mad_format_internal(fmt, args_array, 2);
+    pfree(args_array);
+    pfree(arg1);
+    pfree(arg2);
+    
+    PG_RETURN_TEXT_P(result);
+}
+PG_FUNCTION_INFO_V1(mad_format2);
+
+/*
+ * @brief Short form to format a string with three parameters.
+ *
+ * @param arg1	The first argument.
+ * @param arg2	The second argument.
+ * @param arg3	The third argument.
+ *
+ * @return The formated string.
+ *
+ */
+Datum mad_format3(PG_FUNCTION_ARGS)
+{
+    char        *fmt;
+    char        *arg1;
+    char        *arg2;
+    char        *arg3;
+    char       **args_array;
+    text        *result;
+    
+    mad_do_assert(!(PG_ARGISNULL(0) || PG_ARGISNULL(1)
+                    || PG_ARGISNULL(2) || PG_ARGISNULL(3)),
+                  "the format string and its arguments must not be null");
+    
+    fmt = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    arg1 = text_to_cstring(PG_GETARG_TEXT_PP(1));
+    arg2 = text_to_cstring(PG_GETARG_TEXT_PP(2));
+    arg3 = text_to_cstring(PG_GETARG_TEXT_PP(3));
+    
+    args_array = (char **) palloc0(3 * sizeof(char *));
+    args_array[0] = arg1;
+    args_array[1] = arg2;
+    args_array[2] = arg3;
+    
+    result = mad_format_internal(fmt, args_array, 3);
+    pfree(args_array);
+    pfree(arg1);
+    pfree(arg2);
+    pfree(arg3);
+    
+    PG_RETURN_TEXT_P(result);
+}
+PG_FUNCTION_INFO_V1(mad_format3);
+
+/*
+ * @brief Short form to format a string with four parameters.
+ *
+ * @param arg1	The first argument.
+ * @param arg2	The second argument.
+ * @param arg3	The third argument.
+ * @param arg4	The fouth argument.
+ *   
+ * @return The formated string.
+ *
+ */
+Datum mad_format4(PG_FUNCTION_ARGS)
+{
+    char        *fmt;
+    char        *arg1;
+    char        *arg2;
+    char        *arg3;
+    char        *arg4;
+    char       **args_array;
+    text        *result;
+    
+    mad_do_assert(!(PG_ARGISNULL(0) || PG_ARGISNULL(1)
+                    || PG_ARGISNULL(2)|| PG_ARGISNULL(3) ||PG_ARGISNULL(4)),
+                  "the format string and its arguments must not be null");
+    
+    fmt = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    arg1 = text_to_cstring(PG_GETARG_TEXT_PP(1));
+    arg2 = text_to_cstring(PG_GETARG_TEXT_PP(2));
+    arg3 = text_to_cstring(PG_GETARG_TEXT_PP(3));
+    arg4 = text_to_cstring(PG_GETARG_TEXT_PP(4));
+    
+    args_array = (char **) palloc0(4 * sizeof(char *));
+    args_array[0] = arg1;
+    args_array[1] = arg2;
+    args_array[2] = arg3;
+    args_array[3] = arg4;
+
+    result = mad_format_internal(fmt, args_array, 4);
+    pfree(args_array);
+    pfree(arg1);
+    pfree(arg2);
+    pfree(arg3);
+    pfree(arg4);
+    
+    PG_RETURN_TEXT_P(result);
+}
+PG_FUNCTION_INFO_V1(mad_format4);
+
+/*
+ * @brief We need to build a lot of query strings based on a set of arguments. For that
+ *        purpose, this function will take a format string (the template) and an array
+ *        of values, scan through the format string, and replace the %s in the format
+ *        string with the corresponding values in the array. The result string is
+ *        returned as a PG/GP text Datum. The escape char for '%' is '\'. And we will
+ *        not change it's default behavior in PG/GP. For example, assume that
+ *        fmt = E'\\\\\\\\ % \\% %', args[] = {"100", "20"}, then the returned text
+ *        of this function is E'\\\\\\\\ 100 % 20'
+ *
+ * @param fmt       The format string. %s are used to indicate a position
+ *                  where a value should be filled in.
+ * @param args      An array of values that should be used for replacements.
+ *                  args[i] replaces the i-th % in fmt. The array length should
+ *                  equal to the number of %s in fmt.
+ *
+ * @return A string with all %s which were not escaped in first argument replaced
+ *         with the corresponding values in the second argument.
+ *
+ */
+Datum mad_format(PG_FUNCTION_ARGS)
+{
+    char           *fmt;
+    text           *result;
+    ArrayType      *args;
+    int             nitems;
+    ArrayMetaState *my_extra = NULL;
+    Oid             element_type;
+    int			    typlen;
+	bool		    typbyval;
+	char		    typalign;
+    char          **args_array;
+    int             i;
+    Datum           elt;
+    char           *ptr;
+    
+    mad_do_assert(!(PG_ARGISNULL(0) || PG_ARGISNULL(1)),
+                  "the format string and its arguments must not be null");
+
+    fmt = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    args = PG_GETARG_ARRAYTYPE_P(1);
+
+    mad_do_assert(!ARR_NULLBITMAP(args),
+                  "the argument array must not has null value");
+    element_type = ARR_ELEMTYPE(args);
+    /*
+	 * We arrange to look up info about element type, including its output
+	 * conversion proc, only once per series of calls, assuming the element
+	 * type doesn't change underneath us.
+	 */
+	my_extra = (ArrayMetaState *) fcinfo->flinfo->fn_extra;
+	if (my_extra == NULL)
+	{
+		fcinfo->flinfo->fn_extra = MemoryContextAlloc
+									(
+										fcinfo->flinfo->fn_mcxt,
+										sizeof(ArrayMetaState)
+									);
+		my_extra = (ArrayMetaState *) fcinfo->flinfo->fn_extra;
+		my_extra->element_type = ~element_type;
+	}
+
+    if (my_extra->element_type != element_type)
+	{
+
+        /* Get info about element type, including its output conversion proc */
+		get_type_io_data
+			(
+				element_type,
+				IOFunc_output,
+				&my_extra->typlen,
+				&my_extra->typbyval,
+				&my_extra->typalign,
+				&my_extra->typdelim,
+				&my_extra->typioparam,
+				&my_extra->typiofunc
+			);
+		fmgr_info_cxt
+			(
+				my_extra->typiofunc,
+				&my_extra->proc,
+				fcinfo->flinfo->fn_mcxt
+			);
+		my_extra->element_type = element_type;
+	}
+	typlen = my_extra->typlen;
+	typbyval = my_extra->typbyval;
+	typalign = my_extra->typalign;
+    nitems = ArrayGetNItems(ARR_NDIM(args), ARR_DIMS(args));
+
+    args_array = (char **) palloc0(nitems * sizeof(char *));
+    ptr = ARR_DATA_PTR(args);
+    
+    for (i = 0; i < nitems; i++)
+    {
+        elt = fetch_att(ptr, typbyval, typlen);
+        ptr = att_addlength_pointer(ptr, typlen, ptr);
+        ptr = (char *) att_align_nominal(ptr, typalign);
+        args_array[i] = OutputFunctionCall(&my_extra->proc, elt);
+    }
+
+    result = mad_format_internal(fmt, args_array, nitems);
+    
+    pfree(args_array);
+    PG_FREE_IF_COPY(args, 1);
+    
+    PG_RETURN_TEXT_P(result);
+}
+PG_FUNCTION_INFO_V1(mad_format);
