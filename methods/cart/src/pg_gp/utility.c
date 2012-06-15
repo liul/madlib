@@ -1147,7 +1147,8 @@ Datum mad_format(PG_FUNCTION_ARGS)
 
     args_array = (char **) palloc0(nitems * sizeof(char *));
     ptr = ARR_DATA_PTR(args);
-    
+
+    /* construct char** type args array from args */
     for (i = 0; i < nitems; i++)
     {
         elt = fetch_att(ptr, typbyval, typlen);
