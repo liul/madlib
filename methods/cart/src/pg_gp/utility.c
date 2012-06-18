@@ -340,8 +340,11 @@ void mad_assert(PG_FUNCTION_ARGS)
     bool    condition = PG_GETARG_BOOL(0);
     text   *reason    = PG_GETARG_TEXT_PP(1);
     
-    mad_do_assert(condition,
-                  text_to_cstring(reason));
+    mad_do_assert
+        (
+            condition,
+            text_to_cstring(reason)
+        );
 }
 PG_FUNCTION_INFO_V1(mad_assert);
 
