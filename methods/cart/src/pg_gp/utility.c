@@ -44,7 +44,7 @@ PG_MODULE_MAGIC;
 #define COMMA_CHAR ','
 #define SPACE_CHAR ' '
 
-#define mad_do_assert(condition, message) \
+#define mad_do_assert(condition, message)               \
     do {                                                \
         if (!(condition))                               \
             ereport(ERROR,                              \
@@ -64,14 +64,14 @@ PG_MODULE_MAGIC;
                     );                                  \
     } while (0)
 
+/* 
+ * This function checks whether the specified table exists or not.
+ */
 static bool table_exists_internal(text* full_table_name)
 {
-    List           *names;
-    Oid             relid;
+    List   *names = textToQualifiedNameList(full_table_name);
+    Oid     relid = RangeVarGetRelid(makeRangeVarFromNameList(names), true);
 
-    names = textToQualifiedNameList(full_table_name);
-    relid = RangeVarGetRelid(makeRangeVarFromNameList(names), true);
-    
     return OidIsValid(relid); 
 }
 
@@ -226,23 +226,22 @@ mad_escape_pct_sym
 }
 
 /*
- * The guts of mad_format. Takes a cstring fmt and cstring array
+ * This is the guts of mad_format. Takes a cstring fmt and cstring array
  * arrgs_array and build the query string.
  */
 static text* mad_format_internal(char *fmt, char **args_array, int nargs)
 {
-    int            *position = (int *) palloc0(nargs * sizeof(int));
+    int            *position  = (int *) palloc0(nargs * sizeof(int));
     int             last_posn = 0;
-    int             fmt_len = 0;
-    int             i;
-    char           *ptr;
+    int             fmt_len   = 0;
+    int             i         = 0;
+    char           *ptr       = NULL;
     StringInfoData  buf;
     
     /*
 	 * split the format string, so that later we can replace the delimiters
 	 * with the given arguments
 	 */
-
 	mad_split_string(fmt, position, nargs, &fmt_len);
     initStringInfo(&buf);
 
@@ -277,37 +276,9 @@ static text* mad_format_internal(char *fmt, char **args_array, int nargs)
 		appendStringInfo(&buf, "%s", fmt + last_posn);
 
     pfree(position);
+    
     return cstring_to_text_with_len(buf.data, buf.len);
 }
-
-/*
- * @brief Cast any value to text.
- *
- * @param val	A value with any specific type.
- * @return The text format string for the value.
- *
- * @note Greenplum doesn't support boolean to text casting.
- *
- */
-Datum mad_to_char(PG_FUNCTION_ARGS)
-{
-    bool        input;
-    char       *result;
-    
-    if (PG_ARGISNULL(0))
-        PG_RETURN_NULL();
-    
-    input = PG_GETARG_BOOL(0);
-    
-    if (input)
-        result = "t";
-    else
-        result = "f";
-    
-
-    PG_RETURN_TEXT_P(cstring_to_text(result));
-}
-PG_FUNCTION_INFO_V1(mad_to_char);
 
 /*
  * @brief Cast regclass to text. 
@@ -332,29 +303,18 @@ Datum mad_regclass_to_text(PG_FUNCTION_ARGS)
  
     if (HeapTupleIsValid(classtup))
     {
-        Form_pg_class classform = (Form_pg_class) GETSTRUCT(classtup);
-        char       *classname = NameStr(classform->relname);
- 
-        /*
-         * In bootstrap mode, skip the fancy namespace stuff and just return
-         * the class name.  (This path is only needed for debugging output
-         * anyway.)
-         */
-        if (IsBootstrapProcessingMode())
-            result = pstrdup(classname);
-        else
-        {
-            char       *nspname;
-            
-            /* Would this class be found by regclassin? If not, qualify it. */
-            if (RelationIsVisible(classid))
-                nspname = NULL;
-            else
-                nspname = get_namespace_name(classform->relnamespace);
-            
-            result = quote_qualified_identifier(nspname, classname);
-        }
+        Form_pg_class  classform = (Form_pg_class) GETSTRUCT(classtup);
+        char          *classname = NameStr(classform->relname);
+        char          *nspname;
         
+        /* Would this class be found by regclassin? If not, qualify it. */
+        if (RelationIsVisible(classid))
+            nspname = NULL;
+        else
+            nspname = get_namespace_name(classform->relnamespace);
+            
+        result = quote_qualified_identifier(nspname, classname);
+           
         ReleaseSysCache(classtup);
     }
     else
@@ -377,15 +337,11 @@ PG_FUNCTION_INFO_V1(mad_regclass_to_text);
  */
 void mad_assert(PG_FUNCTION_ARGS)
 {
-    bool        condition;
-    text       *reason;
-
-    condition = PG_GETARG_BOOL(0);
-    reason = PG_GETARG_TEXT_PP(1);
+    bool    condition = PG_GETARG_BOOL(0);
+    text   *reason    = PG_GETARG_TEXT_PP(1);
     
     mad_do_assert(condition,
                   text_to_cstring(reason));
-              
 }
 PG_FUNCTION_INFO_V1(mad_assert);
 
@@ -439,9 +395,12 @@ Datum mad_column_exists(PG_FUNCTION_ARGS)
     names = textToQualifiedNameList(full_table_name);
     relid = RangeVarGetRelid(makeRangeVarFromNameList(names), true);
 
-    mad_do_assert_value(OidIsValid(relid),
-                        "table \"%s\" does not exist",
-                        (text_to_cstring(full_table_name)));
+    mad_do_assert_value
+        (
+            OidIsValid(relid),
+            "table \"%s\" does not exist",
+            (text_to_cstring(full_table_name))
+        );
     
     /* open the relation to get info */
     rel = relation_open(relid, AccessShareLock);
@@ -454,7 +413,6 @@ Datum mad_column_exists(PG_FUNCTION_ARGS)
             existence = true;
             break;
         }
-  
     }
 
     relation_close(rel, AccessShareLock);
@@ -474,17 +432,34 @@ void mad_assert_table(PG_FUNCTION_ARGS)
     text        *full_table_name;
     bool         existence;
 
+    mad_do_assert
+        (
+            !PG_ARGISNULL(0),
+            "Table name should not be null"
+        );
+    mad_do_assert
+        (
+            !PG_ARGISNULL(1),
+            "Existence should not be null"
+        );
+    
     full_table_name = PG_GETARG_TEXT_PP(0);
     existence = PG_GETARG_BOOL(1);
 
     if (existence)
-        mad_do_assert_value((table_exists_internal(full_table_name) == existence),
-                            "Assertion failure. Talbe \"%s\" does not exit.",
-                            (text_to_cstring(full_table_name)));
+        mad_do_assert_value
+            (
+                (table_exists_internal(full_table_name) == existence),
+                "Assertion failure. Talbe \"%s\" does not exit.",
+                (text_to_cstring(full_table_name))
+            );
     else
-        mad_do_assert_value((table_exists_internal(full_table_name) == existence),
-                            "Assertion failure. Talbe \"%s\" already exit.",
-                            (text_to_cstring(full_table_name)));
+        mad_do_assert_value
+            (
+                (table_exists_internal(full_table_name) == existence),
+                "Assertion failure. Talbe \"%s\" already exit.",
+                (text_to_cstring(full_table_name))
+            );
 }
 PG_FUNCTION_INFO_V1(mad_assert_table);
 
@@ -502,8 +477,11 @@ Datum mad_strip_schema_name(PG_FUNCTION_ARGS)
     List      *names;
     RangeVar  *rel;
 
-    mad_do_assert(!PG_ARGISNULL(0),
-                  "Table name should not be null");
+    mad_do_assert
+        (
+            !PG_ARGISNULL(0),
+            "Table name should not be null"
+        );
 
     full_table_name = PG_GETARG_TEXT_PP(0);
     names = textToQualifiedNameList(full_table_name);
@@ -533,27 +511,30 @@ Datum mad_get_schema_name(PG_FUNCTION_ARGS)
     char      *nspname;
     List      *search_path = fetch_search_path(false);
 
-    mad_do_assert(!PG_ARGISNULL(0),
-                  "Table name should not be null");
+    mad_do_assert
+        (
+            !PG_ARGISNULL(0),
+            "Table name should not be null"
+        );
 
     full_table_name = PG_GETARG_TEXT_PP(0);
-    names = textToQualifiedNameList(full_table_name);
-    rel = makeRangeVarFromNameList(names);
+    names           = textToQualifiedNameList(full_table_name);
+    rel             = makeRangeVarFromNameList(names);
 
     if (rel->schemaname)
+    {
         /* get schema name directly */
         PG_RETURN_TEXT_P(cstring_to_text(rel->schemaname));
+    }
     else
     {
         /* table exists */
         if (OidIsValid(rel))
         {
             /* might have several search paths, table is in one of them */
-            Oid        relid;
-            Oid        nspid;
-            
-            relid = RelnameGetRelid(rel->relname);
-            nspid = get_rel_namespace(relid);
+            Oid    relid = RelnameGetRelid(rel->relname);
+            Oid    nspid = get_rel_namespace(relid);
+
             nspname = get_namespace_name(nspid);
 
             if (nspname)
@@ -568,8 +549,10 @@ Datum mad_get_schema_name(PG_FUNCTION_ARGS)
             PG_RETURN_NULL();
         nspname = get_namespace_name(linitial_oid(search_path));
         list_free(search_path);
+        
         if (!nspname)
-            PG_RETURN_NULL();		/* recently-deleted namespace? */
+            PG_RETURN_NULL();
+        
         PG_RETURN_TEXT_P(cstring_to_text(nspname));
     }
 }
@@ -591,20 +574,20 @@ PG_FUNCTION_INFO_V1(mad_get_schema_name);
 Datum mad_csvstr_to_array(PG_FUNCTION_ARGS)
 {
     text            *inputstring;
-    int              inputstring_len;
-    char            *start_ptr = NULL;
-    char            *str = NULL;
-    char            *orig_str = NULL;
-    int              orig_str_len;
-    int              posn = 0;
-    int              chunk_len = 0;
+    int              inputstring_len = 0;
+    char            *start_ptr       = NULL;
+    char            *str             = NULL;
+    char            *orig_str        = NULL;
+    int              orig_str_len    = 0;
+    int              posn            = 0;
+    int              chunk_len       = 0;
     text            *result_text;
-    ArrayBuildState *astate = NULL;
+    ArrayBuildState *astate          = NULL;
     
     if (PG_ARGISNULL(0))
         PG_RETURN_NULL();
 
-    inputstring = PG_GETARG_TEXT_PP(0);
+    inputstring     = PG_GETARG_TEXT_PP(0);
     inputstring_len = VARSIZE_ANY_EXHDR(inputstring);
 
     /* return empty array for empty input string */
@@ -612,12 +595,16 @@ Datum mad_csvstr_to_array(PG_FUNCTION_ARGS)
         PG_RETURN_ARRAYTYPE_P(construct_empty_array(TEXTOID));
 
     /* start_ptr points to the start_posn'th character of inputstring */
-    orig_str = str_tolower(VARDATA_ANY(inputstring),
-                           inputstring_len,
-                           PG_GET_COLLATION());
+    orig_str = str_tolower
+        (
+            VARDATA_ANY(inputstring),
+            inputstring_len,
+            PG_GET_COLLATION()
+        );
+    
     orig_str_len = strlen(orig_str);
-    str = orig_str;
-    start_ptr = str;
+    str          = orig_str;
+    start_ptr    = str;
     
     for (; str != NULL && *str != '\0'; ++str)
     {
@@ -626,11 +613,14 @@ Datum mad_csvstr_to_array(PG_FUNCTION_ARGS)
             /* must build a temp text datum to pass to accumArrayResult */
             result_text = DirectFunctionCall1(btrim1, cstring_to_text_with_len(start_ptr, chunk_len));
             /* stash away this field */
-			astate = accumArrayResult(astate,
-									  PointerGetDatum(result_text),
-									  false,
-									  TEXTOID,
-									  CurrentMemoryContext);
+			astate = accumArrayResult
+                (
+                    astate,
+                    PointerGetDatum(result_text),
+                    false,
+                    TEXTOID,
+                    CurrentMemoryContext
+                );
             pfree(result_text);
             chunk_len = 0;
             start_ptr = str + 1;
@@ -642,11 +632,14 @@ Datum mad_csvstr_to_array(PG_FUNCTION_ARGS)
 
     /* field after the last COMMA_CHAR */
     result_text = DirectFunctionCall1(btrim1, cstring_to_text_with_len(start_ptr, chunk_len));
-    astate = accumArrayResult(astate,
-                              PointerGetDatum(result_text),
-                              false,
-                              TEXTOID,
-                              CurrentMemoryContext);
+    astate = accumArrayResult
+        (
+            astate,
+            PointerGetDatum(result_text),
+            false,
+            TEXTOID,
+            CurrentMemoryContext
+        );
     pfree(result_text);
     pfree(orig_str);
     
@@ -672,17 +665,23 @@ Datum mad_num_of_columns(PG_FUNCTION_ARGS)
     Form_pg_class    relForm;
     int              result;
 
-    mad_do_assert(!PG_ARGISNULL(0),
-                  "Table name should not be null");
+    mad_do_assert
+        (
+            !PG_ARGISNULL(0),
+            "Table name should not be null"
+        );
 
     table_name = PG_GETARG_TEXT_PP(0);
     names = textToQualifiedNameList(table_name);
     relid = RangeVarGetRelid(makeRangeVarFromNameList(names), true);
 
     /* check whether table exists */
-    mad_do_assert_value(OidIsValid(relid),
-                        "table \"%s\"does not exist",
-                        (text_to_cstring(table_name)));
+    mad_do_assert_value
+        (
+            OidIsValid(relid),
+            "table \"%s\"does not exist",
+            (text_to_cstring(table_name))
+        );
 
     relTup = SearchSysCache1(RELOID,
 							 ObjectIdGetDatum(relid));
@@ -732,18 +731,17 @@ Datum mad_columns_in_table(PG_FUNCTION_ARGS)
     if (PG_ARGISNULL(1))
         PG_RETURN_BOOL(false);
 
-
     full_table_name = PG_GETARG_TEXT_PP(0);
-    column_names = PG_GETARG_ARRAYTYPE_P(1);
+    column_names    = PG_GETARG_ARRAYTYPE_P(1);
 
-    ndims = ARR_NDIM(column_names);
+    ndims        = ARR_NDIM(column_names);
     element_type = ARR_ELEMTYPE(column_names);
 
     if (ndims == 0)
         PG_RETURN_BOOL(false);
 
-    dims = ARR_DIMS(column_names);
-    ptr = ARR_DATA_PTR(column_names);
+    dims   = ARR_DIMS(column_names);
+    ptr    = ARR_DATA_PTR(column_names);
     nitems = ArrayGetNItems(ndims, dims);
 
     /*
@@ -758,7 +756,7 @@ Datum mad_columns_in_table(PG_FUNCTION_ARGS)
         typentry = lookup_type_cache(element_type, TYPECACHE_EQ_OPR_FINFO);
         fcinfo->flinfo->fn_extra = (void *) typentry;
     }
-    typlen = typentry->typlen;
+    typlen   = typentry->typlen;
     typbyval = typentry->typbyval;
     typalign = typentry->typalign;
     
@@ -771,7 +769,7 @@ Datum mad_columns_in_table(PG_FUNCTION_ARGS)
     
     /* open the relation to get info */
     rel = relation_open(relid, AccessShareLock);
-    td = RelationGetDescr(rel);
+    td  = RelationGetDescr(rel);
 
     /* Compare each column name got from input and from tuple descriptor */
     all_in = true;
@@ -835,8 +833,8 @@ Datum mad_array_search(PG_FUNCTION_ARGS)
     if (PG_ARGISNULL(1))
         PG_RETURN_BOOL(false);
 
-    find = PG_GETARG_DATUM(0);
-    arr = PG_GETARG_ARRAYTYPE_P(1);
+    find      = PG_GETARG_DATUM(0);
+    arr       = PG_GETARG_ARRAYTYPE_P(1);
     collation = PG_GET_COLLATION();
     
     /* Check type, only compare find and arr element of the same type */
@@ -860,7 +858,7 @@ Datum mad_array_search(PG_FUNCTION_ARGS)
                             format_type_be(element_type))));
 		fcinfo->flinfo->fn_extra = (void *) typentry;
 	}
-	typlen = typentry->typlen;
+	typlen   = typentry->typlen;
 	typbyval = typentry->typbyval;
 	typalign = typentry->typalign;
 
@@ -868,8 +866,8 @@ Datum mad_array_search(PG_FUNCTION_ARGS)
 	InitFunctionCallInfoData(locfcinfo, &typentry->eq_opr_finfo, 2, collation, NULL, NULL);
 
     /* Loop over source array */
-    nitems = ArrayGetNItems(ARR_NDIM(arr), ARR_DIMS(arr));
-    ptr = ARR_DATA_PTR(arr);
+    nitems   = ArrayGetNItems(ARR_NDIM(arr), ARR_DIMS(arr));
+    ptr      = ARR_DATA_PTR(arr);
     contains = false;
     
     for (i = 0; i < nitems; ++i)
@@ -906,22 +904,26 @@ PG_FUNCTION_INFO_V1(mad_array_search);
 Datum mad_format1(PG_FUNCTION_ARGS)
 {
     char        *fmt;
-    char        *arg1;
     char       **args_array;
     text        *result;
+    int          i;
     
-    mad_do_assert(!(PG_ARGISNULL(0) || PG_ARGISNULL(1)),
-                  "the format string and its arguments must not be null");
+    mad_do_assert
+        (
+            !(PG_ARGISNULL(0) || PG_ARGISNULL(1)),
+            "the format string and its arguments must not be null"
+        );
     
     fmt = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    arg1 = text_to_cstring(PG_GETARG_TEXT_PP(1));
-    
-    args_array = (char **) palloc0(sizeof(char *));
-    args_array[0] = arg1;
+    args_array = (char **) palloc0(3 * sizeof(char *));
 
+    for (i = 0; i < 1; i++)
+    {
+        args_array[i] = text_to_cstring(PG_GETARG_TEXT_PP(i+1));
+    }
+    
     result = mad_format_internal(fmt, args_array, 1);
     pfree(args_array);
-    pfree(arg1);
     
     PG_RETURN_TEXT_P(result);
 }
@@ -939,26 +941,27 @@ PG_FUNCTION_INFO_V1(mad_format1);
 Datum mad_format2(PG_FUNCTION_ARGS)
 {
     char        *fmt;
-    char        *arg1;
-    char        *arg2;
     char       **args_array;
     text        *result;
+    int          i;
     
-    mad_do_assert(!(PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2)),
-                  "the format string and its arguments must not be null");
+    mad_do_assert
+        (
+            !(PG_ARGISNULL(0) || PG_ARGISNULL(1)
+              || PG_ARGISNULL(2)),
+            "the format string and its arguments must not be null"
+        );
     
     fmt = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    arg1 = text_to_cstring(PG_GETARG_TEXT_PP(1));
-    arg2 = text_to_cstring(PG_GETARG_TEXT_PP(2));
-    
-    args_array = (char **) palloc0(2 * sizeof(char *));
-    args_array[0] = arg1;
-    args_array[1] = arg2;
+    args_array = (char **) palloc0(3 * sizeof(char *));
 
+    for (i = 0; i < 2; i++)
+    {
+        args_array[i] = text_to_cstring(PG_GETARG_TEXT_PP(i+1));
+    }
+    
     result = mad_format_internal(fmt, args_array, 2);
     pfree(args_array);
-    pfree(arg1);
-    pfree(arg2);
     
     PG_RETURN_TEXT_P(result);
 }
@@ -977,31 +980,27 @@ PG_FUNCTION_INFO_V1(mad_format2);
 Datum mad_format3(PG_FUNCTION_ARGS)
 {
     char        *fmt;
-    char        *arg1;
-    char        *arg2;
-    char        *arg3;
     char       **args_array;
     text        *result;
+    int          i;
     
-    mad_do_assert(!(PG_ARGISNULL(0) || PG_ARGISNULL(1)
-                    || PG_ARGISNULL(2) || PG_ARGISNULL(3)),
-                  "the format string and its arguments must not be null");
+    mad_do_assert
+        (
+            !(PG_ARGISNULL(0) || PG_ARGISNULL(1)
+              || PG_ARGISNULL(2) || PG_ARGISNULL(3)),
+            "the format string and its arguments must not be null"
+        );
     
     fmt = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    arg1 = text_to_cstring(PG_GETARG_TEXT_PP(1));
-    arg2 = text_to_cstring(PG_GETARG_TEXT_PP(2));
-    arg3 = text_to_cstring(PG_GETARG_TEXT_PP(3));
-    
     args_array = (char **) palloc0(3 * sizeof(char *));
-    args_array[0] = arg1;
-    args_array[1] = arg2;
-    args_array[2] = arg3;
+
+    for (i = 0; i < 3; i++)
+    {
+        args_array[i] = text_to_cstring(PG_GETARG_TEXT_PP(i+1));
+    }
     
     result = mad_format_internal(fmt, args_array, 3);
     pfree(args_array);
-    pfree(arg1);
-    pfree(arg2);
-    pfree(arg3);
     
     PG_RETURN_TEXT_P(result);
 }
@@ -1021,35 +1020,27 @@ PG_FUNCTION_INFO_V1(mad_format3);
 Datum mad_format4(PG_FUNCTION_ARGS)
 {
     char        *fmt;
-    char        *arg1;
-    char        *arg2;
-    char        *arg3;
-    char        *arg4;
     char       **args_array;
     text        *result;
+    int          i;
     
-    mad_do_assert(!(PG_ARGISNULL(0) || PG_ARGISNULL(1)
-                    || PG_ARGISNULL(2)|| PG_ARGISNULL(3) ||PG_ARGISNULL(4)),
-                  "the format string and its arguments must not be null");
+    mad_do_assert
+        (
+            !(PG_ARGISNULL(0) || PG_ARGISNULL(1)
+              || PG_ARGISNULL(2) || PG_ARGISNULL(3) || PG_ARGISNULL(4)),
+            "the format string and its arguments must not be null"
+        );
     
     fmt = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    arg1 = text_to_cstring(PG_GETARG_TEXT_PP(1));
-    arg2 = text_to_cstring(PG_GETARG_TEXT_PP(2));
-    arg3 = text_to_cstring(PG_GETARG_TEXT_PP(3));
-    arg4 = text_to_cstring(PG_GETARG_TEXT_PP(4));
-    
     args_array = (char **) palloc0(4 * sizeof(char *));
-    args_array[0] = arg1;
-    args_array[1] = arg2;
-    args_array[2] = arg3;
-    args_array[3] = arg4;
 
+    for (i = 0; i < 4; i++)
+    {
+        args_array[i] = text_to_cstring(PG_GETARG_TEXT_PP(i+1));
+    }
+    
     result = mad_format_internal(fmt, args_array, 4);
     pfree(args_array);
-    pfree(arg1);
-    pfree(arg2);
-    pfree(arg3);
-    pfree(arg4);
     
     PG_RETURN_TEXT_P(result);
 }
@@ -1080,25 +1071,32 @@ Datum mad_format(PG_FUNCTION_ARGS)
     char           *fmt;
     text           *result;
     ArrayType      *args;
-    int             nitems;
-    ArrayMetaState *my_extra = NULL;
+    int             nitems       = 0;
+    ArrayMetaState *my_extra     = NULL;
     Oid             element_type;
-    int			    typlen;
+    int			    typlen       = 0;
 	bool		    typbyval;
 	char		    typalign;
     char          **args_array;
-    int             i;
+    int             i            =0;
     Datum           elt;
     char           *ptr;
     
-    mad_do_assert(!(PG_ARGISNULL(0) || PG_ARGISNULL(1)),
-                  "the format string and its arguments must not be null");
+    mad_do_assert
+        (
+            !(PG_ARGISNULL(0) || PG_ARGISNULL(1)),
+            "the format string and its arguments must not be null"
+        );
 
     fmt = text_to_cstring(PG_GETARG_TEXT_PP(0));
     args = PG_GETARG_ARRAYTYPE_P(1);
 
-    mad_do_assert(!ARR_NULLBITMAP(args),
-                  "the argument array must not has null value");
+    mad_do_assert
+        (
+            !ARR_NULLBITMAP(args),
+            "the argument array must not has null value"
+        );
+    
     element_type = ARR_ELEMTYPE(args);
     /*
 	 * We arrange to look up info about element type, including its output
@@ -1120,7 +1118,7 @@ Datum mad_format(PG_FUNCTION_ARGS)
     if (my_extra->element_type != element_type)
 	{
 
-        /* Get info about element type, including its output conversion proc */
+        /* Get info about element type, including its output conversion proc. */
 		get_type_io_data
 			(
 				element_type,
@@ -1148,7 +1146,7 @@ Datum mad_format(PG_FUNCTION_ARGS)
     args_array = (char **) palloc0(nitems * sizeof(char *));
     ptr = ARR_DATA_PTR(args);
 
-    /* construct char** type args array from args */
+    /* Construct char** type args array from args. */
     for (i = 0; i < nitems; i++)
     {
         elt = fetch_att(ptr, typbyval, typlen);
