@@ -766,9 +766,12 @@ Datum mad_columns_in_table(PG_FUNCTION_ARGS)
     names = textToQualifiedNameList(full_table_name);
     relid = RangeVarGetRelid(makeRangeVarFromNameList(names), true);
 
-    mad_do_assert_value(OidIsValid(relid),
-                        "table \"%s\" does not exist",
-                        (text_to_cstring(full_table_name)));
+    mad_do_assert_value
+        (
+            OidIsValid(relid),
+            "table \"%s\" does not exist",
+            (text_to_cstring(full_table_name))
+        );
     
     /* open the relation to get info */
     rel = relation_open(relid, AccessShareLock);
